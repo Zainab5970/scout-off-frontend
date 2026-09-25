@@ -4,6 +4,7 @@ import { sanitize } from '@/lib/sanitize';
 import { hasValidMagicBytes, bufToHex } from '@/lib/fileSignature';
 import { checkRateLimit, getClientIp } from '@/lib/rateLimit';
 import { createRequestLogger } from '@/lib/logger';
+import { withOutboundSpan, withRouteTelemetry } from '@/lib/telemetry';
 import {
   verifyUploadedContent,
   UploadVerificationError,
@@ -34,7 +35,7 @@ const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024;
 /** Accepted MIME type prefixes */
 const ALLOWED_MIME_PREFIXES = ['image/', 'video/'];
 
-export async function POST(req: NextRequest) {
+async function postIpfsUpload(req: NextRequest) {
   const log = createRequestLogger(req);
   const ip = getClientIp(req);
 
@@ -138,15 +139,20 @@ export async function POST(req: NextRequest) {
     const pinataForm = new FormData();
     pinataForm.append('file', file);
 
-    const { data } = await axios.post(
-      'https://api.pinata.cloud/pinning/pinFileToIPFS',
-      pinataForm,
-      {
-        headers: {
-          pinata_api_key: process.env.PINATA_API_KEY!,
-          pinata_secret_api_key: process.env.PINATA_SECRET!,
-        },
-      },
+    const { data } = await withOutboundSpan(
+      'pinata.pinFileToIPFS',
+      { dependency: 'pinata', operation: 'pinFileToIPFS' },
+      () =>
+        axios.post(
+          'https://api.pinata.cloud/pinning/pinFileToIPFS',
+          pinataForm,
+          {
+            headers: {
+              pinata_api_key: process.env.PINATA_API_KEY!,
+              pinata_secret_api_key: process.env.PINATA_SECRET!,
+            },
+          },
+        ),
     );
     cid = data.IpfsHash;
   } catch (err) {
@@ -166,7 +172,14 @@ export async function POST(req: NextRequest) {
   // lib/uploadVerification.ts for why this checks gateway-retrievable bytes
   // rather than recomputing the CID itself.
   try {
-    await verifyUploadedContent(cid, Buffer.from(await file.arrayBuffer()));
+    await withOutboundSpan(
+      'ipfs.upload.verify',
+      { dependency: 'ipfs-gateway', operation: 'verify-upload' },
+      () =>
+        file
+          .arrayBuffer()
+          .then((bytes) => verifyUploadedContent(cid, Buffer.from(bytes))),
+    );
   } catch (err) {
     log.error('Upload verification failed', {
       ip,
@@ -186,3 +199,5 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({ cid });
 }
+
+export const POST = withRouteTelemetry(postIpfsUpload, '/api/ipfs/upload');

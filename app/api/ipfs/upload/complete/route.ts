@@ -4,6 +4,7 @@ import { assembleFile, cleanupSession } from '@/lib/chunkedUploadStore';
 import { hasValidMagicBytes, bufToHex } from '@/lib/fileSignature';
 import { getClientIp, createRateLimiter } from '@/lib/uploadRateLimit';
 import { createRequestLogger } from '@/lib/logger';
+import { withOutboundSpan, withRouteTelemetry } from '@/lib/telemetry';
 import {
   verifyUploadedContent,
   UploadVerificationError,
@@ -25,7 +26,7 @@ const checkRateLimit = createRateLimiter(20, 60 * 1000);
 
 const ALLOWED_MIME_PREFIXES = ['image/', 'video/'];
 
-export async function POST(req: NextRequest) {
+async function postCompleteUpload(req: NextRequest) {
   const log = createRequestLogger(req);
   const ip = getClientIp(req);
   const rl = checkRateLimit(ip);
@@ -106,15 +107,20 @@ export async function POST(req: NextRequest) {
     });
     pinataForm.append('file', file);
 
-    const { data } = await axios.post(
-      'https://api.pinata.cloud/pinning/pinFileToIPFS',
-      pinataForm,
-      {
-        headers: {
-          pinata_api_key: process.env.PINATA_API_KEY!,
-          pinata_secret_api_key: process.env.PINATA_SECRET!,
-        },
-      },
+    const { data } = await withOutboundSpan(
+      'pinata.pinFileToIPFS',
+      { dependency: 'pinata', operation: 'pinFileToIPFS' },
+      () =>
+        axios.post(
+          'https://api.pinata.cloud/pinning/pinFileToIPFS',
+          pinataForm,
+          {
+            headers: {
+              pinata_api_key: process.env.PINATA_API_KEY!,
+              pinata_secret_api_key: process.env.PINATA_SECRET!,
+            },
+          },
+        ),
     );
     cid = data.IpfsHash;
   } catch (err) {
@@ -137,7 +143,11 @@ export async function POST(req: NextRequest) {
   // lib/uploadVerification.ts for why this checks gateway-retrievable bytes
   // rather than recomputing the CID itself.
   try {
-    await verifyUploadedContent(cid, buffer);
+    await withOutboundSpan(
+      'ipfs.upload.verify',
+      { dependency: 'ipfs-gateway', operation: 'verify-upload' },
+      () => verifyUploadedContent(cid, buffer),
+    );
   } catch (err) {
     // Same reasoning as a Pinata failure above: the assembled chunks are
     // still valid (the content is unchanged), so preserve the session
@@ -161,3 +171,8 @@ export async function POST(req: NextRequest) {
   await cleanupSession(sessionId);
   return NextResponse.json({ cid });
 }
+
+export const POST = withRouteTelemetry(
+  postCompleteUpload,
+  '/api/ipfs/upload/complete',
+);

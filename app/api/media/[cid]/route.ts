@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifyMediaUrlSignature } from '@/lib/mediaUrlSigning';
 import { createRequestLogger } from '@/lib/logger';
 import { fetchMediaFromGateways } from '@/lib/mediaProxyGateway';
+import { withRouteTelemetry } from '@/lib/telemetry';
 
 /**
  * GET /api/media/[cid]
@@ -97,7 +98,7 @@ function isAllowedReferrer(req: NextRequest): boolean {
   }
 }
 
-export async function GET(
+async function getMedia(
   req: NextRequest,
   { params }: { params: { cid: string } },
 ) {
@@ -188,3 +189,5 @@ export async function GET(
     return NextResponse.json({ error: 'Media not available' }, { status: 502 });
   }
 }
+
+export const GET = withRouteTelemetry(getMedia, '/api/media/[cid]');
